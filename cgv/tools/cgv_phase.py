@@ -33,10 +33,10 @@ from math import gcd
 import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-try:  # standalone (cgv/tools) or bundled in cygv (cygv._cgv_phase next to cygv._cgv_run)
+if os.path.exists(os.path.join(HERE, "cgv_run.py")):   # standalone: cgv/tools
     sys.path.insert(0, HERE)
     import cgv_run  # noqa: E402  (normaliz helpers and cgv's input writer)
-except ImportError:
+else:                                                   # bundled in cygv, next to cygv._cgv_run
     from cygv import _cgv_run as cgv_run  # noqa: E402
 
 BIN = os.path.join(HERE, "..", "cgv")
