@@ -24,8 +24,12 @@ jobs:
             mingw-w64-x86_64-gcc
             mingw-w64-x86_64-python
             mingw-w64-x86_64-python-numpy
-      - name: normaliz (Hilbert bases of the cones K_T)
-        run: pacman -S --noconfirm --needed mingw-w64-x86_64-normaliz && normaliz --version
+            unzip
+      - name: normaliz (Hilbert bases of the cones K_T; MSYS2 has no package, so the official static build)
+        run: |
+          curl -sSfL -o nmz.zip https://github.com/Normaliz/Normaliz/releases/download/v3.11.1/normaliz-3.11.1-Windows64.zip
+          unzip -q -j nmz.zip normaliz-3.11.1/normaliz.exe -d /mingw64/bin
+          normaliz --version
       - name: Build (portable flags, as a wheel would use)
         working-directory: cgv
         run: |
