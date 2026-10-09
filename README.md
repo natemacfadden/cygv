@@ -62,8 +62,9 @@ with [cgv](cgv/), a C implementation that is also exact and much faster on deep 
 compute_gv(generators, grading_vector, q, intnums, max_deg=30, backend="cgv")
 ```
 
-It is fastest with [normaliz](https://github.com/Normaliz/Normaliz) on the `PATH`; without it, cgv
-enumerates the Mori cone itself (same result, about ten times slower on deep degrees).
+It needs [normaliz](https://github.com/Normaliz/Normaliz) on the `PATH` (e.g. `conda install -c
+conda-forge normaliz`). cgv uses only the cone the generators span (every lattice point of it), so any
+vectors spanning the Mori cone will do.
 
 cgv can also run on a GPU: `device="auto"` (the default) picks a suitable GPU if there is one, else
 the CPU; `"cpu"`, `"gpu"` and `"gpu:N"` choose explicitly. The prebuilt wheels are CPU-only. For the
@@ -83,8 +84,10 @@ when running.
 
 `compute_gv_phase(cones, q, intnums, max_deg)` (and `compute_gw_phase`) computes the invariants in a given phase of the
 ambient toric variety, given its fan (maximal cones as column indices of `q`): an FRST or a vex fan, where curves of
-negative anticanonical degree exist and are handled with a pole-free prescription. Optional `generators` (all or a
-subset of the Mori cone, e.g. for lightcone GVs), `saturate`, `grading_vector` and `device` as above. It needs
+negative anticanonical degree exist and are handled with a pole-free prescription. Optional: `mori_rays` (vectors
+spanning the Mori cone; default its wall curves), `grading_vector`, `device` as above, and `lightcone`: curve classes
+whose backward lightcones alone are computed (the classes C with p - C in the Mori cone, exactly those feeding into p;
+`max_deg` is then optional). It needs
 [normaliz](https://github.com/Normaliz/Normaliz) and uses cgv; see `cgv/README.md`, "Any phase".
 
 ## Command line interface

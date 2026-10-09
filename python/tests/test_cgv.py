@@ -21,6 +21,13 @@ REPO = Path(__file__).resolve().parents[2]
 REFS = REPO / "cgv" / "tests" / "refs"
 
 
+def _need_normaliz() -> None:
+    import shutil  # noqa: PLC0415
+
+    if shutil.which("normaliz") is None:
+        pytest.skip("backend='cgv' needs normaliz")
+
+
 def test_bundled_cgv_run_is_a_copy() -> None:
     """python/cygv/_cgv_run.py must stay identical to cgv/tools/cgv_run.py."""
     tools = REPO / "cgv" / "tools" / "cgv_run.py"
@@ -32,6 +39,7 @@ def test_bundled_cgv_run_is_a_copy() -> None:
 
 def test_cgv_backend_matches() -> None:
     """backend='cgv' gives cygv's GV and GW invariants exactly."""
+    _need_normaliz()
     for name in [
         "quintic_D10",
         "h10_72_3998_0_default_K5",
@@ -45,7 +53,7 @@ def test_cgv_backend_matches() -> None:
             ref = json.load(f)
         d = ref["input"]
         kw: dict[str, Any] = {
-            "generators": d["generators"],
+            "generators": d["mori_rays"],
             "grading_vector": d["grading_vector"],
             "q": d["q"],
             "intnums": {(i, j, k): x for i, j, k, x in d["intnums"]},
@@ -62,6 +70,7 @@ def test_cgv_backend_two_parameter_model() -> None:
     geometry, and cgv, which combines the h11 instanton series weighted by the grading vector,
     then depends on the grading vector. On real geometries both backends agree.
     """
+    _need_normaliz()
     kw: dict[str, Any] = {
         "generators": [[1, 0], [0, 1]],
         "grading_vector": [1, 1],
@@ -80,6 +89,7 @@ def test_cgv_backend_devices(monkeypatch: pytest.MonkeyPatch) -> None:
     """device='cpu' always; device='gpu' if this cygv was built with cgv's GPU variant."""
     from cygv.cygv import _cgv_gpu_executable  # noqa: PLC0415
 
+    _need_normaliz()
     kw: dict[str, Any] = {
         "generators": [[1, 0], [0, 1]],
         "grading_vector": [1, 1],
@@ -122,13 +132,10 @@ def test_bundled_cgv_phase_is_a_copy() -> None:
 
 
 def _phase_ref(name: str) -> dict[str, Any]:
-    import shutil  # noqa: PLC0415
-
     path = REPO / "cgv" / "tests" / "refs_vex" / f"{name}.json.gz"
     if not path.exists():
         pytest.skip("not a repository checkout")
-    if shutil.which("normaliz") is None:
-        pytest.skip("compute_gv_phase needs normaliz")
+    _need_normaliz()
     with gzip.open(path) as f:
         ref: dict[str, Any] = json.load(f)
     return ref
@@ -177,3 +184,32 @@ def test_phase_vex_equals_frst_of_another_polytope() -> None:
     }
     assert mapped == sides["frst"]
     assert len(mapped) > 100
+
+
+def test_phase_lightcone() -> None:
+    """compute_gv_phase(lightcone=...) equals the full computation on the backward lightcones."""
+    import numpy as np  # noqa: PLC0415
+
+    from cygv import _cgv_phase, _cgv_run, compute_gv_phase  # noqa: PLC0415
+
+    r = _phase_ref("liam_h3_fan4")
+    kappa = {(i, j, k): v for i, j, k, v in r["kappa"]}
+    full = {tuple(k): v for k, v in r["gvs"]}
+    w = np.array(r["grading"])
+    by_degree = sorted(full, key=lambda c: (int(w @ c), c))
+    pts = [by_degree[-1], by_degree[len(by_degree) // 2]]
+    got = dict(
+        compute_gv_phase(
+            r["cones"], r["q"], kappa, grading_vector=r["grading"], lightcone=pts
+        )
+    )
+    # the backward lightcone of p: the classes C with p - C in the Mori cone {x : H x >= 0}
+    d = _cgv_phase.prepare(r["cones"], r["q"], kappa, grading=r["grading"])  # type: ignore[no-untyped-call]
+    h = np.array(_cgv_run.cone_data(d)["facets"])  # type: ignore[no-untyped-call]
+    want = {
+        c: v
+        for c, v in full.items()
+        if any((h @ (np.array(p) - np.array(c)) >= 0).all() for p in pts)
+    }
+    assert got == want
+    assert 0 < len(got) < len(full)

@@ -52,9 +52,9 @@ if len(sys.argv) > 1:
             ci, q, kappa = cgv_phase.phase_from_polytope(p, [tuple(lab[tuple(c)] for c in cone) for cone in pr[s]["cones"]])
             sides[s] = dict(cones=ci, q=q, kappa=kappa, d=cgv_phase.prepare(ci, q, kappa), vertices=pr[s]["vertices"])
         T = np.array(pr["T"][0])
-        GF = (np.round(np.linalg.inv(T.T)).astype(np.int64) @ np.array(sides["frst"]["d"]["generators"]).T).T
+        GF = (np.round(np.linalg.inv(T.T)).astype(np.int64) @ np.array(sides["frst"]["d"]["mori_rays"]).T).T
         try:
-            w = [int(x) for x in Cone(np.vstack([np.array(sides["vex"]["d"]["generators"]), GF])).find_grading_vector()]
+            w = [int(x) for x in Cone(np.vstack([np.array(sides["vex"]["d"]["mori_rays"]), GF])).find_grading_vector()]
         except Exception:
             continue
         gv = cgv_phase.compute_gv(sides["vex"]["cones"], sides["vex"]["q"], sides["vex"]["kappa"], D, grading=w)

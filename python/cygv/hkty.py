@@ -167,7 +167,8 @@ def _cgv_gvs(
     from cygv.cygv import _cgv_executable, _cgv_gpu_executable  # noqa: PLC0415
 
     d = {
-        "generators": [[int(x) for x in g] for g in np.array(generators, dtype=int)],
+        # cgv needs only the cone the generators span (it uses every lattice point of it)
+        "mori_rays": [[int(x) for x in g] for g in np.array(generators, dtype=int)],
         "grading_vector": [int(x) for x in np.array(grading_vector, dtype=int)],
         "q": [[int(x) for x in r] for r in np.array(q, dtype=int)],
         "intnums": [
@@ -187,9 +188,11 @@ def _cgv_gvs(
     threads = os.cpu_count() or 1
     try:
         out = _cgv_run.run_cgv(d, int(max_deg), threads, extra=extra)  # type: ignore[no-untyped-call]
-    except FileNotFoundError:
-        # no normaliz for the cone data: cgv enumerates the cone itself (same result, slower)
-        out = _cgv_run.run_cgv(d, int(max_deg), threads, extra=extra, cones=False)  # type: ignore[no-untyped-call]
+    except FileNotFoundError as e:
+        msg = (
+            "backend='cgv' needs normaliz (e.g. conda install -c conda-forge normaliz)"
+        )
+        raise RuntimeError(msg) from e
     gvs: dict[tuple[int, ...], int] = out[0]
     return gvs
 
@@ -198,10 +201,10 @@ def _cgv_phase_gvs(
     cones: ArrayLike,
     q: ArrayLike,
     intnums: dict[tuple[int, int, int], int],
-    max_deg: int,
-    generators: ArrayLike | None,
+    max_deg: int | None,
+    mori_rays: ArrayLike | None,
     grading_vector: ArrayLike | None,
-    saturate: bool,
+    lightcone: ArrayLike | None,
     device: str,
 ) -> tuple[dict[tuple[int, ...], int], list[int]]:
     """GV invariants in the phase given by a fan, with the bundled cgv program, through the same
@@ -215,12 +218,19 @@ def _cgv_phase_gvs(
             [[int(x) for x in r] for r in np.array(q, dtype=int)],
             {(int(i), int(j), int(k)): int(v) for (i, j, k), v in intnums.items()},
             None
-            if generators is None
-            else [[int(x) for x in g] for g in np.array(generators, dtype=int)],
+            if mori_rays is None
+            else [[int(x) for x in g] for g in np.array(mori_rays, dtype=int)],
             None
             if grading_vector is None
             else [int(x) for x in np.array(grading_vector, dtype=int)],
-            saturate,
+            None
+            if lightcone is None
+            else [
+                [int(x) for x in p]
+                for p in np.array(lightcone, dtype=int).reshape(
+                    -1, np.array(q).shape[0]
+                )
+            ],
         )
     except FileNotFoundError as e:
         msg = "compute_gv_phase needs normaliz (e.g. conda install -c conda-forge normaliz)"
@@ -233,7 +243,11 @@ def _cgv_phase_gvs(
         raise ValueError(msg)
     binary = gpu_bin if extra else _cgv_executable()
     gvs, _ = _cgv_phase.run(
-        d, int(max_deg), os.cpu_count() or 1, binary=binary, extra=extra
+        d,
+        None if max_deg is None else int(max_deg),
+        os.cpu_count() or 1,
+        binary=binary,
+        extra=extra,
     )  # type: ignore[no-untyped-call]
     grading: list[int] = d["grading_vector"]
     return gvs, grading
@@ -243,22 +257,24 @@ def compute_gv_phase(
     cones: ArrayLike,
     q: ArrayLike,
     intnums: dict[tuple[int, int, int], int],
-    max_deg: int,
-    generators: ArrayLike | None = None,
+    max_deg: int | None = None,
+    mori_rays: ArrayLike | None = None,
     grading_vector: ArrayLike | None = None,
-    saturate: bool = True,
+    lightcone: ArrayLike | None = None,
     device: str = "auto",
 ) -> list[Any]:
     """GV invariants of a CY threefold hypersurface in a given phase of the ambient toric variety:
     an FRST or a vex fan (a fine regular fan that does not refine the face fan). Uses cgv.
 
     cones: maximal cones of the fan, as tuples of column indices of q. q, intnums: as for compute_gv.
-    generators: Mori cone generators, or a subset (lightcone GVs); default: the fan's wall curves.
-    saturate: True uses every lattice point of the cone they span (normaliz Hilbert basis); False uses
-    exactly their semigroup. grading_vector: default an interior point of the dual cone. The result is
-    in the same format as compute_gv's. Needs normaliz. See cgv/README.md, "Any phase"."""
+    mori_rays: vectors spanning the Mori cone (redundant allowed); default: the fan's wall curves.
+    grading_vector: default an interior point of the dual cone.
+    lightcone: curve classes p; only their backward lightcones are computed, the classes C with p - C in
+    the Mori cone (exactly the classes whose GVs enter those of p), so the GVs are exact. max_deg is then
+    optional (default: the largest degree of the p); otherwise it is required.
+    The result is in the same format as compute_gv's. Needs normaliz. See cgv/README.md, "Any phase"."""
     gvs, _ = _cgv_phase_gvs(
-        cones, q, intnums, max_deg, generators, grading_vector, saturate, device
+        cones, q, intnums, max_deg, mori_rays, grading_vector, lightcone, device
     )
     return list(gvs.items())
 
@@ -268,9 +284,8 @@ def compute_gw_phase(
     q: ArrayLike,
     intnums: dict[tuple[int, int, int], int],
     max_deg: int,
-    generators: ArrayLike | None = None,
+    mori_rays: ArrayLike | None = None,
     grading_vector: ArrayLike | None = None,
-    saturate: bool = True,
     device: str = "auto",
     prec: int | None = None,
 ) -> list[Any]:
@@ -278,7 +293,7 @@ def compute_gw_phase(
     if prec is not None:
         mp.mp.prec = prec
     gvs, grading = _cgv_phase_gvs(
-        cones, q, intnums, max_deg, generators, grading_vector, saturate, device
+        cones, q, intnums, max_deg, mori_rays, grading_vector, None, device
     )
     gws = _gw_from_gv(gvs, grading, max_deg)
     return [
