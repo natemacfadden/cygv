@@ -16,10 +16,10 @@ Inputs (cygv's, plus the fan):
     q          GLSM charges, h11 x N (column i: D_i = sum_a q[a][i] J_a)
     kappa      CY triple intersections in the same basis: {(a, b, c): v} or [[a, b, c, v], ...]
 optional:
-    generators Mori cone generators, or those of a subcone (lightcone GVs); default: the fan's wall curves
-    saturate   True: every lattice point of the cone they span (normaliz Hilbert basis); False: exactly their
-               semigroup (as cygv), full enumeration
-    grading    grading vector, positive on the generators; default: an interior point of the dual cone
+    mori_rays  vectors spanning the Mori cone (redundant allowed); default: the fan's wall curves
+    lightcone  curves p: compute only their backward lightcones, the curves C with p - C in the Mori cone (exactly
+               the curves whose GVs enter those of p); max_deg then defaults to the largest degree of the p
+    grading    grading vector, positive on the Mori cone; default: an interior point of the dual cone
 
 Derived here (numpy + normaliz; no CYTools): ray vectors (integer Gale dual of q), the fan's toric intersection ring
 (kappa is checked against it), wall curves, vex cones (rays sharing no facet of conv(rays)) and their exact classes.
@@ -231,7 +231,7 @@ def _primitive(v):
     return [x // g for x in iv]
 
 
-def prepare(cones, q, kappa, generators=None, grading=None, saturate=True, check_kappa=True):
+def prepare(cones, q, kappa, mori_rays=None, grading=None, lightcone=None, check_kappa=True):
     fan = Fan(cones, q)
     kappa = {tuple(sorted(int(x) for x in k[:3])): int(k[3]) for k in kappa} if not isinstance(kappa, dict) else \
             {tuple(sorted(int(x) for x in k)): int(v) for k, v in kappa.items()}
@@ -240,71 +240,40 @@ def prepare(cones, q, kappa, generators=None, grading=None, saturate=True, check
         bad = {k for k in set(kf) | set(kappa) if kf.get(k, 0) != kappa.get(k, 0)}
         if bad: raise ValueError(f"kappa does not match the fan's intersection ring (e.g. {sorted(bad)[:3]}); check that q and kappa use the same basis")
     walls = None
-    if generators is None:
-        if not saturate: raise ValueError("saturate=False needs explicit generators")
+    if mori_rays is None:
         walls = [_primitive(fan.wall_class(S)) for S in fan.walls()]
         gens = sorted({tuple(w) for w in walls if any(w)})
     else:
-        gens = [tuple(int(x) for x in g) for g in generators]
+        gens = [tuple(int(x) for x in g) for g in mori_rays]
     G = np.array(gens, dtype=np.int64)
-    if saturate:
-        G, hyp = cgv_run._normaliz("cone", G.tolist(), G.shape[1])
-    else:
-        _, hyp = cgv_run._normaliz("cone", G.tolist(), G.shape[1])
+    _, hyp = cgv_run._normaliz("cone", G.tolist(), G.shape[1], hilbert_basis=False)
     if grading is None:
         grading = [int(x) for x in np.asarray(hyp).sum(0)]
     if not ((G @ np.array(grading)) > 0).all():
-        raise ValueError("grading is not positive on every generator (pass grading=...)")
+        raise ValueError("grading is not positive on the Mori cone (pass grading=...)")
     vex = fan.vex_faces()
     if any(len(S) == 2 for S in vex):
         raise ValueError(f"vex 2-cone(s) {[S for S in vex if len(S) == 2]}: impossible for a fine fan on a reflexive polytope "
                          "(MacFadden-Sheridan, arXiv:2512.14817, Prop. 5); check that the fan is fine and uses every boundary "
                          "point not interior to a facet")
     strata = [(list(S), fan.stratum_class(S, kappa)) for S in vex]
-    return dict(q=fan.q, generators=G.tolist(), mori_rays=[list(g) for g in gens], dual_rays=np.asarray(hyp).tolist(),
+    return dict(q=fan.q, mori_rays=[list(g) for g in gens],
+                lightcone=None if lightcone is None else [[int(x) for x in p] for p in lightcone],
                 grading_vector=list(map(int, grading)),
                 intnums=[[a, b, c, v] for (a, b, c), v in kappa.items()], strata=strata,
-                vex_cones=[S for S, _ in strata], saturate=saturate, fan=fan)
+                vex_cones=[S for S, _ in strata], fan=fan)
 
 
-def cone_data_vex(d):
-    base = cgv_run.cone_data(d)
-    cones, tsets = list(base["cones"]), [list(T) + [-1] * (3 - len(T)) for T in base["tsets"]]
-    G = np.array(d["generators"], dtype=np.int64); Q = np.array(d["q"], dtype=np.int64).T
-    _, hyp = cgv_run._normaliz("cone", G.tolist(), G.shape[1])
-    for T in d["vex_cones"]:
-        if len(T) != 3: continue
-        keep = [r for r in range(Q.shape[0]) if r not in T]
-        B, _ = cgv_run._normaliz("inequalities", np.vstack([hyp, Q[keep]]).tolist(), G.shape[1])
-        cones.append(B.tolist()); tsets.append(sorted(T))
-    return dict(mori_hb=base["mori_hb"], cones=cones, tsets=tsets)
+def write_input(d, max_deg, path):
+    """cgv's input for a prepared phase: cgv_run.write_input carries the vex 3-cones, the strata and the lightcone."""
+    cgv_run.write_input(d, max_deg, path)
 
 
-def write_input(d, max_deg, path, cones=True):
-    cgv_run.write_input(d, max_deg, path, cones=False)
-    with open(path, "a") as f:
-        if cones:
-            cd = cone_data_vex(d)
-            f.write("2\n%d\n" % len(cd["mori_hb"]))
-            f.writelines(" ".join(map(str, g)) + "\n" for g in cd["mori_hb"])
-            f.write("%d\n" % -len(cd["cones"]))
-            for B, T in zip(cd["cones"], cd["tsets"]):
-                f.write(f"{len(B)} {T[0]} {T[1]} {T[2]}\n")
-                f.writelines(" ".join(map(str, g)) + "\n" for g in B)
-        else:
-            f.write("0\n")
-        f.write("%d\n" % len(d["strata"]))
-        for S, vals in d["strata"]:
-            f.write(f"{len(S)} {' '.join(map(str, S))} {' '.join(str(Fraction(v)) for v in vals)}\n")
-
-
-def run(d, max_deg, threads=None, cone_data=True, binary=None, extra=()):
-    """GVs {curve: value} for a prepared phase (binary: e.g. ../cgv_gpu with extra=["-g", "0"]).
-    cone_data is ignored (full enumeration) when saturate=False."""
-    use_cones = cone_data and d.get("saturate", True)
+def run(d, max_deg, threads=None, binary=None, extra=()):
+    """GVs {curve: value} for a prepared phase (binary: e.g. ../cgv_gpu with extra=["-g", "0"])."""
     with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
         path = f.name
-    write_input(d, max_deg, path, use_cones)
+    write_input(d, max_deg, path)
     p = subprocess.run([binary or BIN, "-t", str(threads or os.cpu_count()), *extra, path], capture_output=True, text=True)
     os.unlink(path)
     if p.returncode: raise RuntimeError(p.stderr[-2000:])
@@ -314,9 +283,9 @@ def run(d, max_deg, threads=None, cone_data=True, binary=None, extra=()):
     return out, p.stderr
 
 
-def compute_gv(cones, q, kappa, max_deg, generators=None, grading=None, saturate=True, threads=None, check_kappa=True,
-               binary=None, extra=()):
-    d = prepare(cones, q, kappa, generators, grading, saturate, check_kappa)
+def compute_gv(cones, q, kappa, max_deg=None, mori_rays=None, grading=None, lightcone=None, threads=None,
+               check_kappa=True, binary=None, extra=()):
+    d = prepare(cones, q, kappa, mori_rays, grading, lightcone, check_kappa)
     return run(d, max_deg, threads, binary=binary, extra=extra)[0]
 
 

@@ -14,6 +14,7 @@ from cgv_run import compute_gvs
 gvs = compute_gvs(cy, max_deg=24)                       # {curve: GV}, like cy.compute_gvs(...).dok
 gvs = compute_gvs(cy, max_deg=24, grading_vec=p)        # custom grading vector
 gvs = compute_gvs(cy, max_deg=24, device="cpu")         # or "gpu", "gpu:1", "auto" (default)
+gvs = compute_gvs(cy, lightcone=[c1, c2])               # only c1, c2 and the curves feeding into them
 ```
 
 From the shell (input written by `tools/cgv_run.py`'s `write_input`):
@@ -63,12 +64,12 @@ import sys; sys.path.insert(0, "path/to/cgv/tools")
 from cgv_phase import compute_gv, phase_from_polytope
 gvs = compute_gv(cones, q, kappa, max_deg=20)      # cones: maximal cones as column indices of q
 cones, q, kappa = phase_from_polytope(p, fan)      # optional: from a CYTools polytope and its fan (point labels)
-gvs = compute_gv(cones, q, kappa, 20, generators=subset, saturate=False)   # lightcone GVs: a subset of generators
+gvs = compute_gv(cones, q, kappa, lightcone=pts)  # GVs of pts and every curve feeding into them (exact)
 ```
 
-Inputs are cygv's (`q`, `kappa`, optionally `generators` and `grading`) plus the fan. Everything else is derived with
+Inputs are `q`, `kappa` and the fan, optionally `mori_rays`, `grading` and `lightcone`. Everything else is derived with
 numpy and normaliz: the rays (integer Gale dual of `q`), the fan's intersection ring (`kappa` is checked against it),
-the Mori cone (wall curves) and its Hilbert basis, and the vex cones with their exact stratum classes. With no vex
+the Mori cone (wall curves), and the vex cones with their exact stratum classes. With no vex
 cones the run is plain cgv. Validation: the FRST and vex phases of Liam's two examples agree with his exact-rational
 reference and across every flop; and vex phases of one polytope reproduce FRSTs of *another* polytope with the same CY
 (identified by a basis change of kappa and c2) class by class, e.g. about 3 million classes over 247 such pairs at
@@ -112,9 +113,14 @@ python tools/certify.py in.txt gvs.txt 4
 
 1. Arithmetic mod ~62-bit primes (Montgomery), 2–4 primes carried as lanes; integer GVs by CRT,
    with one extra prime as a check (more passes run automatically if the check fails).
-2. Only curves with <= 2 negative GLSM intersections carry fundamental-period data; they are the
-   lattice points of a few cones (Hilbert bases by normaliz, cached in `~/.cache/cgv`), so the
-   Mori cone is never enumerated (checked saturated; otherwise falls back to full enumeration).
+2. Only curves with <= 2 negative GLSM intersections (3 on a vex stratum) carry fundamental-period data;
+   they are the lattice points of the cones K_T = Mori cone cap {Q_r.C >= 0, r not in T}, listed from
+   their Hilbert bases (normaliz, cached in `~/.cache/cgv`). So the Mori cone is never enumerated, and the
+   input needs only a description of it: any vectors spanning it (`mori_rays`) or any inequalities cutting it
+   out (`mori_hyperplanes`), redundant either way. Optional points p (`lightcone`) keep only their backward
+   lightcones, the curves C with p - C in the Mori cone: every curve feeding into p's GV is one of them, so
+   the result is exact. (Restricting to any other set, e.g. a cone that is not a face of the Mori cone, drops
+   curves that feed in; the GVs then stop being integers and cgv stops with "CRT did not stabilize".)
 3. One instanton polynomial I = sum_t w_t inst_t (w = grading vector) instead of h11 of them.
    After subtracting lower curves, I[C] = deg(C) A_C, A_C = sum_{n|C} GV_{C/n}/n^3.
 4. Each curve's correction is s_C z^C exp(C.alpha), computed with the Euler recurrence per degree
