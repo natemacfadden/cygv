@@ -1,8 +1,10 @@
 //! Builds the cgv program (cgv/, a standalone C program) when the `cgv` feature is on.
 //!
 //! Same as the `cgv` target of cgv/Makefile: gv.c is compiled once per number of prime lanes
-//! (2, 3, 4) and linked with main.c. The only difference is portable instead of native CPU
-//! flags, so the result runs on any machine of the target architecture (~2% slower).
+//! (2, 3, 4) and key width (128, 256, 512 bits; main.c switches to wider keys when an input needs
+//! them) and linked with main.c. The only difference is portable instead of native CPU flags, so
+//! the result runs on any machine of the target architecture (~2% slower). The objects are
+//! compiled in parallel (cargo's job count).
 //!
 //! On Linux it also builds the GPU variant (the `cgv_gpu` and `cgv_hip` targets of the Makefile)
 //! if a GPU compiler is found: CUDA's nvcc (`NVCC`, `CUDA_HOME`/`CUDA_PATH`, or `PATH`) or HIP's
@@ -15,6 +17,10 @@
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
+
+/// Key widths gv.c and gpu.cu are built for: (object/entry suffix, CGV_WIDE value).
+const WIDTHS: [(&str, Option<u32>); 3] = [("", None), ("w", Some(256)), ("x", Some(512))];
 
 fn main() {
     for f in [
@@ -52,46 +58,48 @@ fn main() {
     if compiler.is_like_msvc() {
         panic!("the cgv feature needs gcc or clang (cgv uses 128-bit integers, which MSVC lacks); build with MinGW, or disable the feature");
     }
+    // -ffp-contract=off as in the Makefile: no fused multiply-adds, so floating-point results
+    // (lattice reduction, cost estimates) are the same on every architecture
     let flags: &[&str] = if x86_64 {
-        &["-O3", "-march=x86-64-v2"]
+        &["-O3", "-march=x86-64-v2", "-ffp-contract=off"]
     } else {
-        &["-O3"]
+        &["-O3", "-ffp-contract=off"]
     };
     let cc = |args: &[String]| {
         let mut cmd = compiler.to_command();
         cmd.args(flags).args(args);
-        run(cmd)
+        cmd
     };
     let s = |p: &Path| p.display().to_string();
 
     // CPU program
-    let mut objects = vec![];
-    for nl in [2, 3, 4] {
-        let obj = out.join(format!("gv_nl{nl}.o"));
-        cc(&[
-            format!("-DNL={nl}"),
-            format!("-DCGV_ENTRY=cgv_entry_nl{nl}"),
-            "-c".into(),
-            "cgv/gv.c".into(),
-            "-o".into(),
-            s(&obj),
-        ])
-        .expect("building cgv failed");
-        objects.push(s(&obj));
-    }
     let main_obj = s(&out.join("main.o"));
-    cc(&[
+    let mut jobs = vec![cc(&[
         "-c".into(),
         "cgv/main.c".into(),
         "-o".into(),
         main_obj.clone(),
-    ])
-    .expect("building cgv failed");
+    ])];
+    let mut objects = vec![];
+    for nl in [2, 3, 4] {
+        for (w, wide) in WIDTHS {
+            let obj = s(&out.join(format!("gv{w}_nl{nl}.o")));
+            let mut args = vec![
+                format!("-DNL={nl}"),
+                format!("-DCGV_ENTRY=cgv_entry_nl{nl}{w}"),
+            ];
+            args.extend(wide.map(|b| format!("-DCGV_WIDE={b}")));
+            args.extend(["-c".into(), "cgv/gv.c".into(), "-o".into(), obj.clone()]);
+            jobs.push(cc(&args));
+            objects.push(obj);
+        }
+    }
+    run_all(jobs).expect("building cgv failed");
     let exe = s(&out.join(if windows { "cgv.exe" } else { "cgv" }));
     let mut link = vec!["-o".to_string(), exe, main_obj.clone()];
     link.extend(objects);
     link.extend(["-lpthread".to_string(), "-lm".to_string()]);
-    cc(&link).expect("building cgv failed");
+    run(cc(&link)).expect("building cgv failed");
 
     // GPU program (optional)
     let want = env::var("CGV_GPU").unwrap_or_default();
@@ -153,6 +161,33 @@ fn run(mut cmd: Command) -> Result<(), String> {
     }
 }
 
+/// Runs commands in parallel (at most cargo's NUM_JOBS at a time); Err with the first failure.
+fn run_all(cmds: Vec<Command>) -> Result<(), String> {
+    let jobs = env::var("NUM_JOBS")
+        .ok()
+        .and_then(|j| j.parse::<usize>().ok())
+        .unwrap_or(1)
+        .clamp(1, cmds.len().max(1));
+    let queue = Mutex::new(cmds.into_iter());
+    let errors = Mutex::new(vec![]);
+    std::thread::scope(|sc| {
+        for _ in 0..jobs {
+            sc.spawn(|| loop {
+                let Some(cmd) = queue.lock().unwrap().next() else {
+                    break;
+                };
+                if let Err(e) = run(cmd) {
+                    errors.lock().unwrap().push(e);
+                }
+            });
+        }
+    });
+    match errors.into_inner().unwrap().into_iter().next() {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
 /// A tool from an explicit variable (e.g. NVCC), a toolkit root (e.g. CUDA_HOME/bin), or PATH.
 fn find_tool(var: &str, name: &str, roots: &[&str]) -> Option<PathBuf> {
     if let Some(p) = env::var_os(var) {
@@ -169,43 +204,50 @@ fn find_tool(var: &str, name: &str, roots: &[&str]) -> Option<PathBuf> {
     dirs.map(|d| d.join(name)).find(|p| p.is_file())
 }
 
-/// Builds cgv_gpu like the Makefile's cgv_gpu (CUDA) or cgv_hip (HIP) target. Ok(hip) on success.
+/// Builds cgv_gpu like the Makefile's cgv_gpu (CUDA) or cgv_hip (HIP) target: per lane count and
+/// key width, gv.c with the GPU extraction (gvg*) and gpu.cu (gpu*), with gpu_extract/gpu_free_gb
+/// renamed per object pair. Ok(hip) on success.
 fn build_gpu(
     out: &Path,
     gpucc: &Path,
     hip: bool,
-    cc: &dyn Fn(&[String]) -> Result<(), String>,
+    cc: &dyn Fn(&[String]) -> Command,
     main_obj: &str,
 ) -> Result<bool, String> {
     let arch = arch_flags(gpucc, hip)?;
     let mut objects = vec![main_obj.to_string()];
+    let mut jobs = vec![];
     for nl in [2, 3, 4] {
-        let renames = [
-            format!("-DNL={nl}"),
-            format!("-Dgpu_extract=gpu_extract_nl{nl}"),
-            format!("-Dgpu_free_gb=gpu_free_gb_nl{nl}"),
-        ];
-        let obj = out.join(format!("gvg_nl{nl}.o")).display().to_string();
-        let mut args = vec![
-            "-DUSE_GPU".to_string(),
-            format!("-DCGV_ENTRY=cgv_entry_nl{nl}"),
-        ];
-        args.extend(renames.iter().cloned());
-        args.extend(["-c".into(), "cgv/gv.c".into(), "-o".into(), obj.clone()]);
-        cc(&args)?;
-        objects.push(obj);
-        let obj = out.join(format!("gpu_nl{nl}.o")).display().to_string();
-        let mut cmd = Command::new(gpucc);
-        cmd.arg("-O3");
-        if hip {
-            cmd.args(["-x", "hip"]);
+        for (w, wide) in WIDTHS {
+            let mut defs = vec![
+                format!("-DNL={nl}"),
+                format!("-Dgpu_extract=gpu_extract_nl{nl}{w}"),
+                format!("-Dgpu_free_gb=gpu_free_gb_nl{nl}{w}"),
+            ];
+            defs.extend(wide.map(|b| format!("-DCGV_WIDE={b}")));
+            let obj = out.join(format!("gvg{w}_nl{nl}.o")).display().to_string();
+            let mut args = vec![
+                "-DUSE_GPU".to_string(),
+                format!("-DCGV_ENTRY=cgv_entry_nl{nl}{w}"),
+            ];
+            args.extend(defs.iter().cloned());
+            args.extend(["-c".into(), "cgv/gv.c".into(), "-o".into(), obj.clone()]);
+            jobs.push(cc(&args));
+            objects.push(obj);
+            let obj = out.join(format!("gpu{w}_nl{nl}.o")).display().to_string();
+            let mut cmd = Command::new(gpucc);
+            cmd.arg("-O3");
+            if hip {
+                cmd.args(["-x", "hip"]);
+            }
+            cmd.args(&arch)
+                .args(&defs)
+                .args(["-c", "cgv/gpu.cu", "-o", &obj]);
+            jobs.push(cmd);
+            objects.push(obj);
         }
-        cmd.args(&arch)
-            .args(&renames)
-            .args(["-c", "cgv/gpu.cu", "-o", &obj]);
-        run(cmd)?;
-        objects.push(obj);
     }
+    run_all(jobs)?;
     let exe = out.join("cgv_gpu").display().to_string();
     let mut cmd = Command::new(gpucc);
     cmd.args(&arch)

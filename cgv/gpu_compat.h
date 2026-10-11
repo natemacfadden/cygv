@@ -57,6 +57,7 @@ __device__ __forceinline__ unsigned warp_match_any(unsigned mask, int v) {
 }
 __device__ __forceinline__ void warp_sync(void) { __builtin_amdgcn_wave_barrier(); }
 __device__ __forceinline__ int warp_any(unsigned mask, int p) { (void)mask; return __any(p); }
+__device__ __forceinline__ unsigned warp_ballot(int p) { return (unsigned)__ballot(p); }
 
 #else /* CUDA */
 #include <cuda_runtime.h>
@@ -78,6 +79,7 @@ template <class T> __device__ __forceinline__ T warp_shfl(unsigned mask, T v, in
 __device__ __forceinline__ unsigned warp_match_any(unsigned mask, int v) { return __match_any_sync(mask, v); }
 __device__ __forceinline__ void warp_sync(void) { __syncwarp(); }
 __device__ __forceinline__ int warp_any(unsigned mask, int p) { return __any_sync(mask, p); }
+__device__ __forceinline__ unsigned warp_ballot(int p) { return __ballot_sync(0xffffffffu, p); }   /* full warp */
 #endif
 
 #endif

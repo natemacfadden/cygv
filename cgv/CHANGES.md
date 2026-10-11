@@ -1,5 +1,66 @@
 # Changes since the 2026-09-23 snapshot
 
+## Speed and capacity (2026-10): optimization pass
+Every change below was A/B-tested against the previous state on three machines (M1 Pro, Core Ultra 7 + RTX 5090,
+i5-10600K + RX 6700 XT) with identical output required (sha of the sorted GVs), then kept only if it was clearly faster in
+most cases and used at most ~25% more memory.
+
+Overall, production -> this version, same machines, identical output:
+- CPU: -35 to -50% on a Core Ultra 7, -30 to -40% on an i5-10600K, -30 to -35% on an M1 Pro (measured side by side
+  before the last two CPU changes, which were neutral on the M1).
+- GPU extraction at max_deg 32: RTX 5090 39.7 -> 12.4 s (-69%), RX 6700 XT 176 -> 77.7 s (-56%).
+- Memory: lower on the CPU; +13 to +23% GPU memory from class replay (`CGV_MEM=low` turns it off).
+- High h11: faces of up to 40 dimensions at h11 = 491 to max degree 40, on CPU and GPU (e.g. a 32-dimensional face at
+  degree 40: 1.95M GVs in 226 s on 8 CPU threads, ~46 s on the RTX 5090).
+
+CPU:
+- **Level tables**: structure-of-arrays slots, one 8-byte hash slot (32-bit tag + index) in the main point table
+  instead of a key copy (1-thread memory -17 to -23%), level tables that store H(k) so no key is rebuilt in the
+  scatter (-7.5 to -15%), and 64-bit level keys whenever they fit (decoded only for emitted slots; -7 to -18%).
+- **Flush and scatter**: staged flush into the point table (hash, prefetch, then apply; -2.5 to -7%); scatter with
+  the table fields held in locals (no alias reloads); packed key+value records on CPUs with an L2 below 1 MB, chosen
+  at run time (i5-10600K -2 to -18%; split layout elsewhere; `CGV_LT_LAYOUT=packed|split` overrides).
+- **Curve-class pattern replay** (default on): curves of the same degree and nonzero-coordinate pattern share one
+  recorded scatter pattern, replayed with plain gathers; a run-time cost model skips it where it does not pay, and its
+  memory comes from one shared budget. -3 to -23% (deep runs at 8 threads -16 to -23%), memory +1 to +23%.
+  Off with `CGV_CB=0`, or in low-memory mode (`CGV_MEM=low`).
+- **Replay inner loop** sums products in blocks of 16 with one carry fold per block (x86: -0.1 to -6%).
+
+GPU (CUDA and HIP from the same source unless noted):
+- **Level kernels** with shorter dependent-load chains (per-curve work breakpoints instead of a binary search, curve
+  offsets in the entry header, 16-ary warp search): -1 to -2%. Parallel L build and fewer device syncs: -2.4%, GPU
+  memory -3.6%.
+- **Batch-epoch exp-table states**: the emit no longer clears the exp table (-2 to -4.5%); CUDA sm_100+ adds a
+  relaxed-head fast path (-6.5%).
+- **GPU curve-class replay** (default on): -52 to -60% extraction time at max_deg 32 (RTX 5090 38.7 -> 15.2 s,
+  RX 6700 XT 170 -> 81 s) for +13 to +23% GPU memory (buffers scale with the card's memory). Two-pass class emit
+  (probe, then insert the misses): a further -3 to -4%. Off with `CGV_CB=0` or `CGV_MEM=low`.
+- **Device-driven levels** after the first big level (CUDA only; -3.5% on an RTX 5090, neutral-to-slower on AMD, so
+  off there; `CGV_DLEV=0` turns it off).
+
+Capacity (high h11):
+- Curves are kept in coordinates of an LLL-reduced basis of the lattice they span, keys use per-coordinate field
+  widths when needed, and level keys switch to a basis of the L-term lattice when that is smaller. Inputs on faces at
+  h11 = 20-491 run (e.g. an h11 = 150 face to degree 34: 24,196 GVs in 5 s).
+- **Wide keys, automatically**: when the coordinates need more than 128-bit keys, cgv reruns that entry with 256- or
+  512-bit keys (CPU and GPU; input from a pipe is spooled to a temporary file so it can be reread). Nothing to set;
+  the standard inputs keep 128/64-bit keys and run at the same speed. h11 = 491 faces of rank 32-40 to degree 40:
+  CPU 159-226 s on 8 threads, RTX 5090 45 s.
+
+Fixes from the review of this pass: a race on CPU pattern slots, an int overflow in the pattern build above 2^31
+pairs, unchecked 64-bit overflows in coordinate conversion, gpu.cu compiling for NVIDIA GPUs older than sm_100, GPU
+class-replay buffers counted against the GPU memory budget (with a fallback to the hashed path instead of an exit when
+an allocation fails), wide reruns keeping the GPU (`-g`), and lattice reduction in double with `-ffp-contract=off` so
+reduced bases match across architectures (x86 and Apple arm64).
+
+Build: gv.c is now compiled for 3 lane counts x 3 key widths (and gpu.cu likewise), so a full build takes longer
+(`make -j8 cgv cgv_gpu`: ~25 s) and the binaries are larger; `build.rs` (the Python wheel) compiles the same set in
+parallel.
+
+**Low-memory mode** is now `CGV_MEM=low` (`CGV_LOW_MEM=1` and `compute_gvs(..., low_memory=True)` still work as
+aliases): it turns off curve-class replay on CPU and GPU, and on Linux/glibc also maps allocations of 1 MB or more
+separately, as before.
+
 ## Inputs (2026-10): only what the computation needs
 - **The Mori cone is given by any description**: `mori_rays` (any vectors spanning it) or `mori_hyperplanes`
   (any inequalities cutting it out), redundant either way. No lattice points of the Mori cone and no Mori cone
