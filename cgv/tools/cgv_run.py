@@ -189,8 +189,8 @@ def compute_gvs(cy_or_input, max_deg=None, grading_vec=None, device="auto", thre
     threads: CPU threads (default: all cores). Fewer threads use proportionally less host memory
             (each thread keeps its own working tables) and take longer.
     lanes:  number of ~62-bit primes per pass (default: chosen by a cheap probe).
-    low_memory: return freed memory to the system at once (Linux/glibc; CGV_LOW_MEM=1): lower peak host
-            memory for somewhat more time. No effect on macOS.
+    low_memory: low-memory mode (CGV_MEM=low): no curve-class replay (CPU and GPU), and on Linux/glibc freed
+            memory goes back to the system at once. Lower peak memory for somewhat more time.
     """
     global BIN
     d = cy_or_input if isinstance(cy_or_input, dict) else cy_input(cy_or_input, grading_vec)
@@ -207,7 +207,7 @@ def compute_gvs(cy_or_input, max_deg=None, grading_vec=None, device="auto", thre
     BIN = binary
     try:
         out, dt, err = run_cgv(d, max_deg, threads or os.cpu_count(), extra=extra,
-                               env={"CGV_LOW_MEM": "1"} if low_memory else None)
+                               env={"CGV_MEM": "low"} if low_memory else None)
     finally:
         BIN = old
     if verbose:

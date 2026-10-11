@@ -28,9 +28,14 @@ From the shell (input written by `tools/cgv_run.py`'s `write_input`):
 
 Output: one line per nonzero GV, `c_1 ... c_h11 gv`.
 
-Build: `make cgv cgv_gpu` (the GPU build needs nvcc; `CUDA_ARCH` defaults to sm_120);
-`make cgv_hip HIP_ARCH=gfx1100` for AMD (hipcc, 32-lane waves). Tests: `python tests/regress.py`
+Build: `make -j8 cgv cgv_gpu` (the GPU build needs nvcc; `CUDA_ARCH` defaults to sm_120);
+`make -j8 cgv_hip HIP_ARCH=gfx1100` for AMD (hipcc, 32-lane waves). gv.c and gpu.cu are compiled once per lane count
+(2-4) and key width (128, 256, 512 bits), so use `-j`. Tests: `python tests/regress.py`
 (38 frozen cygv 0.2.3 outputs). Changes since the 2026-09-23 snapshot: `CHANGES.md`.
+
+High h11 needs no options: curves are kept in a reduced basis of the lattice they span, and when an input's
+coordinates still need more than 128-bit keys, cgv reruns with 256- or 512-bit keys by itself (CPU and GPU;
+e.g. faces at h11 = 491 to degree 40).
 
 This directory is part of [cygv](https://github.com/ariostas/cygv) and is
 licensed like cygv (GPL-3.0-or-later, see `../LICENSE`). It was developed with Claude (Anthropic)
@@ -45,9 +50,11 @@ Low on memory? Two levers, which stack:
   working tables, so peak host memory drops with the thread count (on top of a fixed part), at the cost of time.
   CPU path, 24 -> 6 threads: max_deg 28 (h11 = 10) 6.1 -> 3.0 GB, 118 -> 192 s; max_deg 26 (h11 = 11) 5.5 -> 2.8 GB,
   62 -> 95 s. Works on every OS (MacBook Pro, 6 threads: the same cases in 3.2 GB).
-- **`CGV_LOW_MEM=1`** (or `compute_gvs(..., low_memory=True)`), Linux/glibc only: every allocation of 1 MB or more
-  gets its own mapping, returned to the system as soon as it is freed (`CGV_LOW_MEM_MB` sets the size).
-  CPU path, max_deg 26-28, 24 threads: peak host memory -22% to -30% for about +10% time. No effect on macOS.
+- **`CGV_MEM=low`** (alias `CGV_LOW_MEM=1`, or `compute_gvs(..., low_memory=True)`): low-memory mode. It turns off
+  curve-class replay on CPU and GPU (which by default buys -3% to -23% CPU time and about half the GPU extraction
+  time for up to ~+25% memory), and on Linux/glibc every allocation of 1 MB or more gets its own mapping, returned to
+  the system as soon as it is freed (`CGV_LOW_MEM_MB` sets the size; no such effect on macOS). `CGV_CB=0` turns off
+  only the class replay.
 
 ## Any phase: FRSTs and vex fans
 
@@ -146,6 +153,10 @@ gradings), and the h11=9 case pfv 2d7b127a at max_deg 10..20 (deg 20 from a 67-m
 ## Tuning knobs (environment)
 
 `CGV_PROF=1` phase/layer profile; `CGV_GPU_MIN`, `CGV_GPU_MAXDEGS`, `CGV_GPU_MIN_GB` (when cgv_gpu uses the GPU);
-`CGV_XTARGET` (GPU batch size); `CGV_LSYNC`, `CGV_CS_NU` (CPU small-layer mode).
+`CGV_XTARGET` (GPU batch size); `CGV_LSYNC`, `CGV_CS_NU` (CPU small-layer mode);
+`CGV_MEM=low` / `CGV_LOW_MEM=1` (low-memory mode, above); `CGV_CB=0` (no curve-class replay, CPU and GPU;
+`CGV_CB_MIN` smallest class replayed); `CGV_LT_LAYOUT=packed|split` (CPU level-table layout; default packed on CPUs
+with an L2 cache below 1 MB, else split); `CGV_DLEV=0` (CUDA: per-level launches instead of device-driven levels);
+`CGV_FORCE_WIDE=256|512` (test hook: run with wider keys).
 
 Run one GPU job per device at a time (each sizes its tables to the free memory).
